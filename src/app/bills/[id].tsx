@@ -28,24 +28,13 @@ import { ARC_TESTNET } from "@/constants/arc";
 import {
   getMobileBill,
   rawUsdcToDisplay,
+  saveMobileBill,
   type MobileBill,
 } from "@/services/mobileBills";
 
-function shortHash(
-  value: string,
-  start = 8,
-  end = 6
-): string {
-  if (value.length <= start + end) {
-    return value;
-  }
-
-  return (
-    value.slice(0, start) +
-    "..." +
-    value.slice(-end)
-  );
-}
+import {
+  readPaymentLink,
+} from "@/services/onChainPaymentLink";
 
 function formatDate(
   value: string
@@ -62,6 +51,25 @@ function formatDate(
   }
 
   return date.toLocaleString();
+}
+
+function shortAddress(
+  value: string,
+  start = 8,
+  end = 6
+): string {
+  if (
+    value.length <=
+    start + end
+  ) {
+    return value;
+  }
+
+  return (
+    value.slice(0, start) +
+    "..." +
+    value.slice(-end)
+  );
 }
 
 export default function BillDetailScreen() {
@@ -83,7 +91,13 @@ export default function BillDetailScreen() {
   const [loading, setLoading] =
     useState(true);
 
+  const [refreshing, setRefreshing] =
+    useState(false);
+
   const [error, setError] =
+    useState("");
+
+  const [syncMessage, setSyncMessage] =
     useState("");
 
   const billId =
@@ -91,57 +105,116 @@ export default function BillDetailScreen() {
       ? params.id[0]
       : params.id;
 
-  useFocusEffect(
-    useCallback(() => {
-      let active = true;
+  const syncBillFromChain =
+    useCallback(
+      async (
+        owner: string,
+        localBill: MobileBill
+      ): Promise<MobileBill> => {
+        const refreshedMembers =
+          await Promise.all(
+            localBill.members.map(
+              async member => {
+                try {
+                  const chain =
+                    await readPaymentLink(
+                      member.id
+                    );
 
-      async function loadBill() {
-        setLoading(true);
-        setError("");
+                  if (
+                    !chain.paid
+                  ) {
+                    return {
+                      ...member,
+                      status:
+                        "unpaid" as const,
+                      payer:
+                        undefined,
+                    };
+                  }
 
+                  return {
+                    ...member,
+                    status:
+                      "paid" as const,
+                    payer:
+                      chain.payer,
+                  };
+                } catch {
+                  // Keep the existing local state if
+                  // one RPC read temporarily fails.
+                  return member;
+                }
+              }
+            )
+          );
+
+        const refreshedBill: MobileBill =
+          {
+            ...localBill,
+            members:
+              refreshedMembers,
+          };
+
+        await saveMobileBill(
+          owner,
+          refreshedBill
+        );
+
+        return refreshedBill;
+      },
+      []
+    );
+
+  const loadBill =
+    useCallback(
+      async (
+        showFullLoader: boolean
+      ) => {
         if (
           !isConnected ||
           !address
         ) {
-          if (active) {
-            setBill(null);
+          setBill(null);
 
-            setError(
-              "Connect the wallet that created this bill."
-            );
+          setError(
+            "Connect the wallet that created this bill."
+          );
 
-            setLoading(false);
-          }
+          setLoading(false);
 
           return;
         }
 
         if (!billId) {
-          if (active) {
-            setBill(null);
+          setBill(null);
 
-            setError(
-              "Bill ID is missing."
-            );
+          setError(
+            "Bill ID is missing."
+          );
 
-            setLoading(false);
-          }
+          setLoading(false);
 
           return;
         }
 
+        if (showFullLoader) {
+          setLoading(true);
+        } else {
+          setRefreshing(true);
+        }
+
+        setError("");
+        setSyncMessage("");
+
         try {
-          const result =
+          const localBill =
             await getMobileBill(
               address,
               billId
             );
 
-          if (!active) {
-            return;
-          }
-
-          if (!result) {
+          if (!localBill) {
             setBill(null);
 
             setError(
@@ -151,39 +224,67 @@ export default function BillDetailScreen() {
             return;
           }
 
-          setBill(result);
-        } catch (loadError) {
-          if (!active) {
-            return;
-          }
+          // Show local data immediately.
+          setBill(
+            localBill
+          );
 
+          setSyncMessage(
+            "Checking payment status on Arc..."
+          );
+
+          const refreshedBill =
+            await syncBillFromChain(
+              address,
+              localBill
+            );
+
+          setBill(
+            refreshedBill
+          );
+
+          const paidCount =
+            refreshedBill.members.filter(
+              member =>
+                member.status ===
+                "paid"
+            ).length;
+
+          setSyncMessage(
+            `On-chain status updated · ${paidCount}/${refreshedBill.members.length} paid`
+          );
+        } catch (loadError) {
           const message =
             loadError instanceof Error
               ? loadError.message
-              : String(loadError);
-
-          setBill(null);
+              : String(
+                  loadError
+                );
 
           setError(
-            `Failed to load bill: ${message}`
+            `Failed to refresh bill: ${message}`
           );
         } finally {
-          if (active) {
-            setLoading(false);
-          }
+          setLoading(false);
+          setRefreshing(false);
         }
-      }
+      },
+      [
+        address,
+        billId,
+        isConnected,
+        syncBillFromChain,
+      ]
+    );
 
-      void loadBill();
+  useFocusEffect(
+    useCallback(() => {
+      void loadBill(
+        true
+      );
 
-      return () => {
-        active = false;
-      };
-    }, [
-      address,
-      billId,
-      isConnected,
-    ])
+      return undefined;
+    }, [loadBill])
   );
 
   const openTransaction =
@@ -224,7 +325,7 @@ export default function BillDetailScreen() {
             styles.loadingText
           }
         >
-          Loading bill...
+          Checking bill on Arc...
         </Text>
       </View>
     );
@@ -286,7 +387,9 @@ export default function BillDetailScreen() {
 
   return (
     <ScrollView
-      style={styles.screen}
+      style={
+        styles.screen
+      }
       contentContainerStyle={
         styles.content
       }
@@ -298,7 +401,9 @@ export default function BillDetailScreen() {
         onPress={() =>
           router.back()
         }
-        style={styles.backButton}
+        style={
+          styles.backButton
+        }
       >
         <Text
           style={
@@ -414,6 +519,72 @@ export default function BillDetailScreen() {
         </View>
       </View>
 
+      <View
+        style={
+          styles.syncCard
+        }
+      >
+        <View
+          style={
+            styles.syncInfo
+          }
+        >
+          <Text
+            style={
+              styles.syncTitle
+            }
+          >
+            On-chain status
+          </Text>
+
+          <Text
+            style={
+              styles.syncText
+            }
+          >
+            {syncMessage ||
+              "Payment status is read directly from Arc Testnet."}
+          </Text>
+
+          {error ? (
+            <Text
+              style={
+                styles.syncError
+              }
+            >
+              {error}
+            </Text>
+          ) : null}
+        </View>
+
+        <TouchableOpacity
+          style={[
+            styles.refreshButton,
+
+            refreshing &&
+              styles.refreshButtonDisabled,
+          ]}
+          disabled={
+            refreshing
+          }
+          onPress={() =>
+            void loadBill(
+              false
+            )
+          }
+        >
+          <Text
+            style={
+              styles.refreshButtonText
+            }
+          >
+            {refreshing
+              ? "Checking..."
+              : "Refresh"}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
       <Text
         style={
           styles.sectionTitle
@@ -447,7 +618,9 @@ export default function BillDetailScreen() {
               style={
                 styles.memberCard
               }
-              activeOpacity={0.85}
+              activeOpacity={
+                0.85
+              }
               onPress={() =>
                 openPaymentLink(
                   member.id
@@ -493,6 +666,7 @@ export default function BillDetailScreen() {
                   <View
                     style={[
                       styles.memberStatus,
+
                       member.status ===
                       "paid"
                         ? styles.memberStatusPaid
@@ -502,6 +676,7 @@ export default function BillDetailScreen() {
                     <Text
                       style={[
                         styles.memberStatusText,
+
                         member.status ===
                         "paid"
                           ? styles.memberStatusPaidText
@@ -525,6 +700,34 @@ export default function BillDetailScreen() {
                 </View>
               </View>
 
+              {member.status ===
+                "paid" &&
+              member.payer ? (
+                <View
+                  style={
+                    styles.payerBox
+                  }
+                >
+                  <Text
+                    style={
+                      styles.detailLabel
+                    }
+                  >
+                    Payer
+                  </Text>
+
+                  <Text
+                    style={
+                      styles.payerText
+                    }
+                  >
+                    {shortAddress(
+                      member.payer
+                    )}
+                  </Text>
+                </View>
+              ) : null}
+
               <View
                 style={
                   styles.linkIdBox
@@ -539,7 +742,9 @@ export default function BillDetailScreen() {
                 </Text>
 
                 <Text
-                  numberOfLines={1}
+                  numberOfLines={
+                    1
+                  }
                   style={
                     styles.monoText
                   }
@@ -816,7 +1021,7 @@ const styles =
       borderRadius: 18,
       backgroundColor:
         "#1769ff",
-      marginBottom: 26,
+      marginBottom: 14,
     },
 
     totalLabel: {
@@ -853,6 +1058,62 @@ const styles =
       color: "#ffffff",
     },
 
+    syncCard: {
+      marginBottom: 24,
+      padding: 14,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor:
+        "#d5e3ff",
+      backgroundColor:
+        "#eef4ff",
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+    },
+
+    syncInfo: {
+      flex: 1,
+    },
+
+    syncTitle: {
+      fontSize: 13,
+      fontWeight: "800",
+      color: "#344054",
+    },
+
+    syncText: {
+      marginTop: 3,
+      fontSize: 11,
+      lineHeight: 16,
+      color: "#667085",
+    },
+
+    syncError: {
+      marginTop: 4,
+      fontSize: 11,
+      lineHeight: 16,
+      color: "#b42318",
+    },
+
+    refreshButton: {
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+      borderRadius: 10,
+      backgroundColor:
+        "#1769ff",
+    },
+
+    refreshButtonDisabled: {
+      opacity: 0.5,
+    },
+
+    refreshButtonText: {
+      fontSize: 12,
+      fontWeight: "800",
+      color: "#ffffff",
+    },
+
     sectionTitle: {
       fontSize: 19,
       fontWeight: "800",
@@ -874,7 +1135,8 @@ const styles =
       padding: 16,
       borderRadius: 16,
       borderWidth: 1,
-      borderColor: "#e3e7ef",
+      borderColor:
+        "#e3e7ef",
       backgroundColor:
         "#ffffff",
     },
@@ -941,6 +1203,22 @@ const styles =
     chevron: {
       fontSize: 24,
       color: "#98a2b3",
+    },
+
+    payerBox: {
+      marginTop: 12,
+      padding: 10,
+      borderRadius: 10,
+      backgroundColor:
+        "#ecfdf3",
+    },
+
+    payerText: {
+      marginTop: 4,
+      fontSize: 12,
+      fontWeight: "700",
+      color: "#027a48",
+      fontFamily: "monospace",
     },
 
     linkIdBox: {
@@ -1012,7 +1290,8 @@ const styles =
       padding: 16,
       borderRadius: 16,
       borderWidth: 1,
-      borderColor: "#e3e7ef",
+      borderColor:
+        "#e3e7ef",
       backgroundColor:
         "#ffffff",
     },

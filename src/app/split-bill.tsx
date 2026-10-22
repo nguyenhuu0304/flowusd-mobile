@@ -1,4 +1,9 @@
-import { useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
 import {
   Alert,
   ScrollView,
@@ -8,6 +13,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+
 import { router } from "expo-router";
 
 import {
@@ -31,10 +37,21 @@ import {
   type MobileBill,
 } from "@/services/mobileBills";
 
+import {
+  connectExistingTelegram,
+  getTelegramDirectory,
+  getTelegramToken,
+  pairTelegramWithCode,
+  registerTelegramMember,
+  syncTelegramBill,
+  type TelegramDirectoryMember,
+} from "@/services/telegramBridge";
+
 type MemberInput = {
   id: number;
   name: string;
   amount: string;
+  directoryId: string | null;
 };
 
 function normalizeChainId(
@@ -55,7 +72,10 @@ function normalizeChainId(
   }
 
   if (value.startsWith("0x")) {
-    const parsed = parseInt(value, 16);
+    const parsed = parseInt(
+      value,
+      16
+    );
 
     return Number.isFinite(parsed)
       ? parsed
@@ -69,6 +89,47 @@ function normalizeChainId(
     : undefined;
 }
 
+function createEmptyMembers(): MemberInput[] {
+  return [
+    {
+      id: 1,
+      name: "",
+      amount: "",
+      directoryId: null,
+    },
+    {
+      id: 2,
+      name: "",
+      amount: "",
+      directoryId: null,
+    },
+  ];
+}
+
+function telegramMemberLabel(
+  member: TelegramDirectoryMember
+): string {
+  if (
+    member.display_name?.trim()
+  ) {
+    return member.display_name.trim();
+  }
+
+  if (
+    member.full_name?.trim()
+  ) {
+    return member.full_name.trim();
+  }
+
+  if (
+    member.username?.trim()
+  ) {
+    return `@${member.username.trim()}`;
+  }
+
+  return "Telegram member";
+}
+
 export default function SplitBillScreen() {
   const {
     address,
@@ -76,7 +137,8 @@ export default function SplitBillScreen() {
     chainId,
   } = useAccount();
 
-  const { provider } = useProvider();
+  const { provider } =
+    useProvider();
 
   const currentChainId =
     normalizeChainId(chainId);
@@ -85,18 +147,9 @@ export default function SplitBillScreen() {
     useState("");
 
   const [members, setMembers] =
-    useState<MemberInput[]>([
-      {
-        id: 1,
-        name: "",
-        amount: "",
-      },
-      {
-        id: 2,
-        name: "",
-        amount: "",
-      },
-    ]);
+    useState<MemberInput[]>(
+      createEmptyMembers()
+    );
 
   const [busy, setBusy] =
     useState(false);
@@ -111,19 +164,184 @@ export default function SplitBillScreen() {
     null
   );
 
-  const totalAmount = useMemo(() => {
-    return members.reduce(
-      (sum, member) => {
-        const value =
-          Number(member.amount);
+  const [
+    telegramConnected,
+    setTelegramConnected,
+  ] = useState(false);
 
-        return Number.isFinite(value)
-          ? sum + value
-          : sum;
-      },
-      0
-    );
-  }, [members]);
+  const [
+    telegramBusy,
+    setTelegramBusy,
+  ] = useState(false);
+
+  const [
+    telegramCode,
+    setTelegramCode,
+  ] = useState("");
+
+  const [
+    telegramMembers,
+    setTelegramMembers,
+  ] = useState<
+    TelegramDirectoryMember[]
+  >([]);
+
+  const [
+    telegramStatus,
+    setTelegramStatus,
+  ] = useState("");
+
+  const [
+    registerCode,
+    setRegisterCode,
+  ] = useState("");
+
+  const [
+    registerDisplayName,
+    setRegisterDisplayName,
+  ] = useState("");
+
+  const [
+    registerFullName,
+    setRegisterFullName,
+  ] = useState("");
+
+  const totalAmount =
+    useMemo(() => {
+      return members.reduce(
+        (
+          sum,
+          member
+        ) => {
+          const value =
+            Number(
+              member.amount
+            );
+
+          return Number.isFinite(
+            value
+          )
+            ? sum + value
+            : sum;
+        },
+        0
+      );
+    }, [members]);
+
+  const loadTelegramDirectory =
+    async (
+      owner: string
+    ) => {
+      const directory =
+        await getTelegramDirectory(
+          owner
+        );
+
+      setTelegramMembers(
+        directory
+      );
+
+      return directory;
+    };
+
+  useEffect(() => {
+    let active = true;
+
+    const restoreTelegram =
+      async () => {
+        if (!address) {
+          setTelegramConnected(
+            false
+          );
+
+          setTelegramMembers(
+            []
+          );
+
+          setTelegramStatus(
+            ""
+          );
+
+          return;
+        }
+
+        try {
+          const token =
+            await getTelegramToken(
+              address
+            );
+
+          if (!active) {
+            return;
+          }
+
+          if (!token) {
+            setTelegramConnected(
+              false
+            );
+
+            setTelegramMembers(
+              []
+            );
+
+            setTelegramStatus(
+              "Telegram not connected on this device."
+            );
+
+            return;
+          }
+
+          setTelegramConnected(
+            true
+          );
+
+          const directory =
+            await getTelegramDirectory(
+              address
+            );
+
+          if (!active) {
+            return;
+          }
+
+          setTelegramMembers(
+            directory
+          );
+
+          setTelegramStatus(
+            `Telegram connected · ${directory.length} registered member${
+              directory.length === 1
+                ? ""
+                : "s"
+            }`
+          );
+        } catch (error) {
+          if (!active) {
+            return;
+          }
+
+          setTelegramConnected(
+            false
+          );
+
+          setTelegramMembers(
+            []
+          );
+
+          setTelegramStatus(
+            error instanceof Error
+              ? error.message
+              : String(error)
+          );
+        }
+      };
+
+    void restoreTelegram();
+
+    return () => {
+      active = false;
+    };
+  }, [address]);
 
   const addMember = () => {
     setMembers(current => [
@@ -132,6 +350,7 @@ export default function SplitBillScreen() {
         id: Date.now(),
         name: "",
         amount: "",
+        directoryId: null,
       },
     ]);
   };
@@ -139,7 +358,9 @@ export default function SplitBillScreen() {
   const removeMember = (
     id: number
   ) => {
-    if (members.length <= 2) {
+    if (
+      members.length <= 2
+    ) {
       Alert.alert(
         "Split Bill",
         "A split bill needs at least 2 members."
@@ -158,7 +379,9 @@ export default function SplitBillScreen() {
 
   const updateMember = (
     id: number,
-    field: "name" | "amount",
+    field:
+      | "name"
+      | "amount",
     value: string
   ) => {
     setMembers(current =>
@@ -166,12 +389,57 @@ export default function SplitBillScreen() {
         member.id === id
           ? {
               ...member,
-              [field]: value,
+              [field]:
+                value,
             }
           : member
       )
     );
   };
+
+  const selectDirectoryMember =
+    (
+      memberId: number,
+      directory:
+        TelegramDirectoryMember
+    ) => {
+      setMembers(current =>
+        current.map(member =>
+          member.id ===
+          memberId
+            ? {
+                ...member,
+
+                name:
+                  telegramMemberLabel(
+                    directory
+                  ),
+
+                directoryId:
+                  directory.id,
+              }
+            : member
+        )
+      );
+    };
+
+  const clearDirectoryMember =
+    (
+      memberId: number
+    ) => {
+      setMembers(current =>
+        current.map(member =>
+          member.id ===
+          memberId
+            ? {
+                ...member,
+                directoryId:
+                  null,
+              }
+            : member
+        )
+      );
+    };
 
   const openBill = (
     billId: string
@@ -180,6 +448,341 @@ export default function SplitBillScreen() {
       `/bills/${billId}` as never
     );
   };
+
+  const handleRestoreTelegram =
+    async () => {
+      if (
+        telegramBusy ||
+        !address ||
+        !provider
+      ) {
+        return;
+      }
+
+      if (
+        currentChainId !==
+        ARC_TESTNET.id
+      ) {
+        Alert.alert(
+          "Wrong network",
+          "Switch your wallet to Arc Testnet first."
+        );
+
+        return;
+      }
+
+      setTelegramBusy(
+        true
+      );
+
+      setTelegramStatus(
+        "Requesting Telegram owner authentication..."
+      );
+
+      try {
+        await connectExistingTelegram(
+          address,
+          provider as Eip1193LikeProvider
+        );
+
+        const directory =
+          await loadTelegramDirectory(
+            address
+          );
+
+        setTelegramConnected(
+          true
+        );
+
+        setTelegramStatus(
+          `Telegram connected · ${directory.length} registered member${
+            directory.length === 1
+              ? ""
+              : "s"
+          }`
+        );
+
+        Alert.alert(
+          "Telegram connected",
+          "FlowUSD Mobile can now use your Telegram Member Directory."
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : String(error);
+
+        setTelegramConnected(
+          false
+        );
+
+        setTelegramStatus(
+          message
+        );
+
+        Alert.alert(
+          "Telegram connection failed",
+          message
+        );
+      } finally {
+        setTelegramBusy(
+          false
+        );
+      }
+    };
+
+  const handlePairTelegram =
+    async () => {
+      if (
+        telegramBusy ||
+        !address ||
+        !provider
+      ) {
+        return;
+      }
+
+      if (
+        currentChainId !==
+        ARC_TESTNET.id
+      ) {
+        Alert.alert(
+          "Wrong network",
+          "Switch your wallet to Arc Testnet first."
+        );
+
+        return;
+      }
+
+      if (
+        !telegramCode.trim()
+      ) {
+        Alert.alert(
+          "Telegram code required",
+          "Open the FlowUSD Telegram bot, send /connect, then enter the code here."
+        );
+
+        return;
+      }
+
+      setTelegramBusy(
+        true
+      );
+
+      setTelegramStatus(
+        "Linking Telegram..."
+      );
+
+      try {
+        await pairTelegramWithCode(
+          address,
+          telegramCode,
+          provider as Eip1193LikeProvider
+        );
+
+        const directory =
+          await loadTelegramDirectory(
+            address
+          );
+
+        setTelegramConnected(
+          true
+        );
+
+        setTelegramCode(
+          ""
+        );
+
+        setTelegramStatus(
+          `Telegram connected · ${directory.length} registered member${
+            directory.length === 1
+              ? ""
+              : "s"
+          }`
+        );
+
+        Alert.alert(
+          "Telegram linked",
+          "Your wallet is now connected to FlowUSD Telegram."
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : String(error);
+
+        setTelegramStatus(
+          message
+        );
+
+        Alert.alert(
+          "Telegram link failed",
+          message
+        );
+      } finally {
+        setTelegramBusy(
+          false
+        );
+      }
+    };
+
+  const handleRefreshDirectory =
+    async () => {
+      if (
+        telegramBusy ||
+        !address
+      ) {
+        return;
+      }
+
+      setTelegramBusy(
+        true
+      );
+
+      setTelegramStatus(
+        "Refreshing Member Directory..."
+      );
+
+      try {
+        const directory =
+          await loadTelegramDirectory(
+            address
+          );
+
+        setTelegramConnected(
+          true
+        );
+
+        setTelegramStatus(
+          `Telegram connected · ${directory.length} registered member${
+            directory.length === 1
+              ? ""
+              : "s"
+          }`
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : String(error);
+
+        setTelegramStatus(
+          message
+        );
+
+        Alert.alert(
+          "Directory refresh failed",
+          message
+        );
+      } finally {
+        setTelegramBusy(
+          false
+        );
+      }
+    };
+
+  const handleRegisterMember =
+    async () => {
+      if (
+        telegramBusy ||
+        !address
+      ) {
+        return;
+      }
+
+      if (
+        !registerCode.trim()
+      ) {
+        Alert.alert(
+          "Register code required",
+          "Ask the member to open the FlowUSD Telegram bot and send /register."
+        );
+
+        return;
+      }
+
+      if (
+        !registerDisplayName.trim()
+      ) {
+        Alert.alert(
+          "Display name required",
+          "Enter a display name for this member."
+        );
+
+        return;
+      }
+
+      setTelegramBusy(
+        true
+      );
+
+      setTelegramStatus(
+        "Registering Telegram member..."
+      );
+
+      try {
+        await registerTelegramMember(
+          address,
+          {
+            code:
+              registerCode,
+
+            displayName:
+              registerDisplayName,
+
+            fullName:
+              registerFullName,
+          }
+        );
+
+        const directory =
+          await loadTelegramDirectory(
+            address
+          );
+
+        setRegisterCode(
+          ""
+        );
+
+        setRegisterDisplayName(
+          ""
+        );
+
+        setRegisterFullName(
+          ""
+        );
+
+        setTelegramStatus(
+          `Member registered · ${directory.length} saved member${
+            directory.length === 1
+              ? ""
+              : "s"
+          }`
+        );
+
+        Alert.alert(
+          "Member registered",
+          "The Telegram member has been added to your FlowUSD Member Directory."
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : String(error);
+
+        setTelegramStatus(
+          message
+        );
+
+        Alert.alert(
+          "Register member failed",
+          message
+        );
+      } finally {
+        setTelegramBusy(
+          false
+        );
+      }
+    };
 
   const handleCreateBill =
     async () => {
@@ -237,16 +840,22 @@ export default function SplitBillScreen() {
           null
         );
 
-        const ids: string[] = [];
-        const amounts: bigint[] = [];
+        const ids: string[] =
+          [];
+
+        const amounts: bigint[] =
+          [];
 
         for (
           let index = 0;
-          index < members.length;
+          index <
+          members.length;
           index++
         ) {
           const member =
-            members[index];
+            members[
+              index
+            ];
 
           if (
             !member.name.trim()
@@ -263,7 +872,9 @@ export default function SplitBillScreen() {
               member.amount
             );
 
-          if (raw <= 0n) {
+          if (
+            raw <= 0n
+          ) {
             throw new Error(
               `Member ${
                 index + 1
@@ -275,10 +886,14 @@ export default function SplitBillScreen() {
             generateLinkId()
           );
 
-          amounts.push(raw);
+          amounts.push(
+            raw
+          );
         }
 
-        setBusy(true);
+        setBusy(
+          true
+        );
 
         setStatus(
           "Waiting for wallet confirmation..."
@@ -305,71 +920,86 @@ export default function SplitBillScreen() {
 
         const totalRaw =
           amounts.reduce(
-            (sum, amount) =>
-              sum + amount,
+            (
+              sum,
+              amount
+            ) =>
+              sum +
+              amount,
             0n
           );
 
         const localBillId =
           createLocalBillId();
 
-        const bill: MobileBill = {
-          id: localBillId,
+        const bill: MobileBill =
+          {
+            id:
+              localBillId,
 
-          title:
-            title.trim() ||
-            "Split Bill",
+            title:
+              title.trim() ||
+              "Split Bill",
 
-          creator: address,
+            creator:
+              address,
 
-          createdAt:
-            new Date().toISOString(),
+            createdAt:
+              new Date()
+                .toISOString(),
 
-          totalRaw:
-            totalRaw.toString(),
+            totalRaw:
+              totalRaw.toString(),
 
-          members:
-            members.map(
-              (
-                member,
-                index
-              ) => ({
-                id: ids[index],
+            members:
+              members.map(
+                (
+                  member,
+                  index
+                ) => ({
+                  id:
+                    ids[index],
 
-                name:
-                  member.name.trim(),
+                  name:
+                    member.name.trim(),
 
-                amountRaw:
-                  amounts[
-                    index
-                  ].toString(),
+                  amountRaw:
+                    amounts[
+                      index
+                    ].toString(),
 
-                status:
-                  "unpaid",
-              })
-            ),
+                  status:
+                    "unpaid",
 
-          txHash,
+                  directoryId:
+                    member.directoryId,
+                })
+              ),
 
-          network: {
-            name:
-              ARC_TESTNET.name,
+            txHash,
 
-            chainId:
-              ARC_TESTNET.id,
-          },
+            network: {
+              name:
+                ARC_TESTNET.name,
 
-          contractAddress:
-            ARC_TESTNET.contracts
-              .batchSplitBill,
-        };
+              chainId:
+                ARC_TESTNET.id,
+            },
+
+            contractAddress:
+              ARC_TESTNET
+                .contracts
+                .batchSplitBill,
+          };
 
         try {
           await saveMobileBill(
             address,
             bill
           );
-        } catch (storageError) {
+        } catch (
+          storageError
+        ) {
           const message =
             storageError instanceof Error
               ? storageError.message
@@ -389,43 +1019,124 @@ export default function SplitBillScreen() {
           return;
         }
 
+        let telegramMessage =
+          "";
+
+        if (
+          telegramConnected
+        ) {
+          try {
+            setStatus(
+              "Blockchain confirmed. Sending Telegram notifications..."
+            );
+
+            await syncTelegramBill(
+              address,
+              {
+                id:
+                  localBillId,
+
+                creator:
+                  address,
+
+                title:
+                  bill.title,
+
+                totalRaw:
+                  bill.totalRaw,
+
+                txHash,
+
+                members:
+                  members.map(
+                    (
+                      member,
+                      index
+                    ) => ({
+                      id:
+                        ids[
+                          index
+                        ],
+
+                      name:
+                        member
+                          .name
+                          .trim(),
+
+                      raw:
+                        amounts[
+                          index
+                        ].toString(),
+
+                      directoryId:
+                        member.directoryId,
+                    })
+                  ),
+              }
+            );
+
+            telegramMessage =
+              "\n\nTelegram notifications sent to registered members.";
+
+            setStatus(
+              "Confirmed, saved and synced to Telegram."
+            );
+          } catch (
+            telegramError
+          ) {
+            const message =
+              telegramError instanceof Error
+                ? telegramError.message
+                : String(
+                    telegramError
+                  );
+
+            telegramMessage =
+              `\n\nBill created, but Telegram sync failed: ${message}`;
+
+            setStatus(
+              `Blockchain confirmed and saved. Telegram sync failed: ${message}`
+            );
+          }
+        } else {
+          setStatus(
+            `Confirmed and saved: ${txHash}`
+          );
+
+          telegramMessage =
+            "\n\nTelegram was not connected, so no Telegram notification was sent.";
+        }
+
         setLastCreatedBillId(
           localBillId
         );
 
-        setStatus(
-          `Confirmed and saved: ${txHash}`
+        setTitle(
+          ""
         );
 
-        setTitle("");
-
-        setMembers([
-          {
-            id: 1,
-            name: "",
-            amount: "",
-          },
-          {
-            id: 2,
-            name: "",
-            amount: "",
-          },
-        ]);
+        setMembers(
+          createEmptyMembers()
+        );
 
         Alert.alert(
           "Split Bill created",
-          `${bill.members.length} payment links were created and saved on this device.\n\nBill ID: ${localBillId}\n\nTx: ${txHash}`,
+          `${bill.members.length} payment links were created and saved.${telegramMessage}\n\nTx: ${txHash}`,
           [
             {
-              text: "Done",
-              style: "cancel",
+              text:
+                "Done",
+              style:
+                "cancel",
             },
             {
-              text: "View Bill",
-              onPress: () =>
-                openBill(
-                  localBillId
-                ),
+              text:
+                "View Bill",
+              onPress:
+                () =>
+                  openBill(
+                    localBillId
+                  ),
             },
           ]
         );
@@ -435,20 +1146,26 @@ export default function SplitBillScreen() {
             ? error.message
             : String(error);
 
-        setStatus(message);
+        setStatus(
+          message
+        );
 
         Alert.alert(
           "Create Split Bill failed",
           message
         );
       } finally {
-        setBusy(false);
+        setBusy(
+          false
+        );
       }
     };
 
   return (
     <ScrollView
-      style={styles.screen}
+      style={
+        styles.screen
+      }
       contentContainerStyle={
         styles.content
       }
@@ -457,12 +1174,18 @@ export default function SplitBillScreen() {
         false
       }
     >
-      <View style={styles.header}>
+      <View
+        style={
+          styles.header
+        }
+      >
         <TouchableOpacity
           onPress={() =>
             router.back()
           }
-          style={styles.backButton}
+          style={
+            styles.backButton
+          }
         >
           <Text
             style={
@@ -473,33 +1196,357 @@ export default function SplitBillScreen() {
           </Text>
         </TouchableOpacity>
 
-        <Text style={styles.title}>
+        <Text
+          style={
+            styles.title
+          }
+        >
           Split Bill
         </Text>
 
         <Text
-          style={styles.subtitle}
+          style={
+            styles.subtitle
+          }
         >
           Create multiple USDC payment links in one Arc Testnet transaction.
         </Text>
       </View>
 
-      <View style={styles.card}>
-        <Text style={styles.label}>
+      <View
+        style={
+          styles.telegramCard
+        }
+      >
+        <View
+          style={
+            styles.telegramHeader
+          }
+        >
+          <View
+            style={
+              styles.telegramHeaderText
+            }
+          >
+            <Text
+              style={
+                styles.telegramTitle
+              }
+            >
+              Telegram
+            </Text>
+
+            <Text
+              style={
+                styles.telegramSubtitle
+              }
+            >
+              Notify registered members when a bill is created.
+            </Text>
+          </View>
+
+          <View
+            style={[
+              styles.telegramBadge,
+
+              telegramConnected
+                ? styles.telegramBadgeOn
+                : styles.telegramBadgeOff,
+            ]}
+          >
+            <Text
+              style={[
+                styles.telegramBadgeText,
+
+                telegramConnected
+                  ? styles.telegramBadgeTextOn
+                  : styles.telegramBadgeTextOff,
+              ]}
+            >
+              {telegramConnected
+                ? "CONNECTED"
+                : "OFF"}
+            </Text>
+          </View>
+        </View>
+
+        {!telegramConnected ? (
+          <>
+            <TouchableOpacity
+              style={
+                styles.telegramPrimaryButton
+              }
+              disabled={
+                telegramBusy ||
+                busy
+              }
+              onPress={
+                handleRestoreTelegram
+              }
+            >
+              <Text
+                style={
+                  styles.telegramPrimaryButtonText
+                }
+              >
+                {telegramBusy
+                  ? "Connecting..."
+                  : "Restore Telegram Session"}
+              </Text>
+            </TouchableOpacity>
+
+            <Text
+              style={
+                styles.telegramOr
+              }
+            >
+              First time linking?
+            </Text>
+
+            <TextInput
+              style={
+                styles.input
+              }
+              placeholder="Telegram /connect code"
+              placeholderTextColor="#98a2b3"
+              autoCapitalize="none"
+              value={
+                telegramCode
+              }
+              editable={
+                !telegramBusy &&
+                !busy
+              }
+              onChangeText={
+                setTelegramCode
+              }
+            />
+
+            <TouchableOpacity
+              style={
+                styles.telegramSecondaryButton
+              }
+              disabled={
+                telegramBusy ||
+                busy
+              }
+              onPress={
+                handlePairTelegram
+              }
+            >
+              <Text
+                style={
+                  styles.telegramSecondaryButtonText
+                }
+              >
+                Link with /connect Code
+              </Text>
+            </TouchableOpacity>
+          </>
+        ) : (
+          <>
+            <View
+              style={
+                styles.directoryRegisterCard
+              }
+            >
+              <Text
+                style={
+                  styles.directoryRegisterTitle
+                }
+              >
+                Member Directory
+              </Text>
+
+              <Text
+                style={
+                  styles.directoryRegisterHelp
+                }
+              >
+                Member sends /register to the FlowUSD Telegram bot, then gives you the one-time code.
+              </Text>
+
+              <TextInput
+                style={[
+                  styles.input,
+                  styles.registerInput,
+                ]}
+                placeholder="Member /register code"
+                placeholderTextColor="#98a2b3"
+                autoCapitalize="none"
+                value={
+                  registerCode
+                }
+                editable={
+                  !telegramBusy &&
+                  !busy
+                }
+                onChangeText={
+                  setRegisterCode
+                }
+              />
+
+              <TextInput
+                style={[
+                  styles.input,
+                  styles.registerInput,
+                ]}
+                placeholder="Display name (e.g. Huy)"
+                placeholderTextColor="#98a2b3"
+                value={
+                  registerDisplayName
+                }
+                editable={
+                  !telegramBusy &&
+                  !busy
+                }
+                maxLength={
+                  60
+                }
+                onChangeText={
+                  setRegisterDisplayName
+                }
+              />
+
+              <TextInput
+                style={[
+                  styles.input,
+                  styles.registerInput,
+                ]}
+                placeholder="Full name (optional)"
+                placeholderTextColor="#98a2b3"
+                value={
+                  registerFullName
+                }
+                editable={
+                  !telegramBusy &&
+                  !busy
+                }
+                maxLength={
+                  120
+                }
+                onChangeText={
+                  setRegisterFullName
+                }
+              />
+
+              <TouchableOpacity
+                style={[
+                  styles.addDirectoryButton,
+
+                  (
+                    telegramBusy ||
+                    !registerCode.trim() ||
+                    !registerDisplayName.trim()
+                  ) &&
+                    styles.disabledButton,
+                ]}
+                disabled={
+                  telegramBusy ||
+                  busy ||
+                  !registerCode.trim() ||
+                  !registerDisplayName.trim()
+                }
+                onPress={
+                  handleRegisterMember
+                }
+              >
+                <Text
+                  style={
+                    styles.addDirectoryButtonText
+                  }
+                >
+                  {telegramBusy
+                    ? "Registering..."
+                    : "Add Member"}
+                </Text>
+              </TouchableOpacity>
+
+              <Text
+                style={
+                  styles.savedMembersText
+                }
+              >
+                Saved members:{" "}
+                <Text
+                  style={
+                    styles.savedMembersCount
+                  }
+                >
+                  {telegramMembers.length}
+                </Text>
+              </Text>
+            </View>
+
+            <TouchableOpacity
+              style={
+                styles.telegramSecondaryButton
+              }
+              disabled={
+                telegramBusy ||
+                busy
+              }
+              onPress={
+                handleRefreshDirectory
+              }
+            >
+              <Text
+                style={
+                  styles.telegramSecondaryButtonText
+                }
+              >
+                Refresh Member Directory
+              </Text>
+            </TouchableOpacity>
+          </>
+        )}
+
+        {telegramStatus ? (
+          <Text
+            style={
+              styles.telegramStatus
+            }
+          >
+            {telegramStatus}
+          </Text>
+        ) : null}
+      </View>
+
+      <View
+        style={
+          styles.card
+        }
+      >
+        <Text
+          style={
+            styles.label
+          }
+        >
           Bill title
         </Text>
 
         <TextInput
-          style={styles.input}
+          style={
+            styles.input
+          }
           placeholder="Dinner, trip, team expense..."
           placeholderTextColor="#98a2b3"
-          value={title}
-          onChangeText={setTitle}
+          value={
+            title
+          }
+          editable={
+            !busy
+          }
+          onChangeText={
+            setTitle
+          }
         />
       </View>
 
       <View
-        style={styles.summaryCard}
+        style={
+          styles.summaryCard
+        }
       >
         <Text
           style={
@@ -514,7 +1561,10 @@ export default function SplitBillScreen() {
             styles.summaryValue
           }
         >
-          {totalAmount.toFixed(2)} USDC
+          {totalAmount.toFixed(
+            2
+          )}{" "}
+          USDC
         </Text>
 
         <Text
@@ -527,7 +1577,9 @@ export default function SplitBillScreen() {
       </View>
 
       <View
-        style={styles.sectionHeader}
+        style={
+          styles.sectionHeader
+        }
       >
         <Text
           style={
@@ -538,9 +1590,15 @@ export default function SplitBillScreen() {
         </Text>
 
         <TouchableOpacity
-          onPress={addMember}
-          style={styles.addButton}
-          disabled={busy}
+          onPress={
+            addMember
+          }
+          style={
+            styles.addButton
+          }
+          disabled={
+            busy
+          }
         >
           <Text
             style={
@@ -553,12 +1611,19 @@ export default function SplitBillScreen() {
       </View>
 
       <View
-        style={styles.memberList}
+        style={
+          styles.memberList
+        }
       >
         {members.map(
-          (member, index) => (
+          (
+            member,
+            index
+          ) => (
             <View
-              key={member.id}
+              key={
+                member.id
+              }
               style={
                 styles.memberCard
               }
@@ -582,7 +1647,9 @@ export default function SplitBillScreen() {
                       member.id
                     )
                   }
-                  disabled={busy}
+                  disabled={
+                    busy
+                  }
                 >
                   <Text
                     style={
@@ -594,24 +1661,129 @@ export default function SplitBillScreen() {
                 </TouchableOpacity>
               </View>
 
+              {telegramConnected &&
+              telegramMembers.length >
+                0 ? (
+                <View
+                  style={
+                    styles.directorySection
+                  }
+                >
+                  <Text
+                    style={
+                      styles.directoryLabel
+                    }
+                  >
+                    Telegram Member Directory
+                  </Text>
+
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={
+                      false
+                    }
+                    contentContainerStyle={
+                      styles.directoryRow
+                    }
+                  >
+                    {telegramMembers.map(
+                      directory => {
+                        const selected =
+                          member.directoryId ===
+                          directory.id;
+
+                        return (
+                          <TouchableOpacity
+                            key={
+                              directory.id
+                            }
+                            style={[
+                              styles.directoryChip,
+
+                              selected &&
+                                styles.directoryChipSelected,
+                            ]}
+                            onPress={() =>
+                              selectDirectoryMember(
+                                member.id,
+                                directory
+                              )
+                            }
+                            disabled={
+                              busy
+                            }
+                          >
+                            <Text
+                              style={[
+                                styles.directoryChipText,
+
+                                selected &&
+                                  styles.directoryChipTextSelected,
+                              ]}
+                            >
+                              {telegramMemberLabel(
+                                directory
+                              )}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      }
+                    )}
+
+                    {member.directoryId ? (
+                      <TouchableOpacity
+                        style={
+                          styles.clearChip
+                        }
+                        onPress={() =>
+                          clearDirectoryMember(
+                            member.id
+                          )
+                        }
+                        disabled={
+                          busy
+                        }
+                      >
+                        <Text
+                          style={
+                            styles.clearChipText
+                          }
+                        >
+                          Clear
+                        </Text>
+                      </TouchableOpacity>
+                    ) : null}
+                  </ScrollView>
+                </View>
+              ) : null}
+
               <Text
-                style={styles.label}
+                style={
+                  styles.label
+                }
               >
                 Name
               </Text>
 
               <TextInput
-                style={styles.input}
+                style={
+                  styles.input
+                }
                 placeholder="Member name"
                 placeholderTextColor="#98a2b3"
-                value={member.name}
-                editable={!busy}
-                onChangeText={value =>
-                  updateMember(
-                    member.id,
-                    "name",
-                    value
-                  )
+                value={
+                  member.name
+                }
+                editable={
+                  !busy
+                }
+                onChangeText={
+                  value =>
+                    updateMember(
+                      member.id,
+                      "name",
+                      value
+                    )
                 }
               />
 
@@ -639,13 +1811,16 @@ export default function SplitBillScreen() {
                   value={
                     member.amount
                   }
-                  editable={!busy}
-                  onChangeText={value =>
-                    updateMember(
-                      member.id,
-                      "amount",
-                      value
-                    )
+                  editable={
+                    !busy
+                  }
+                  onChangeText={
+                    value =>
+                      updateMember(
+                        member.id,
+                        "amount",
+                        value
+                      )
                   }
                 />
 
@@ -663,6 +1838,16 @@ export default function SplitBillScreen() {
                   </Text>
                 </View>
               </View>
+
+              {member.directoryId ? (
+                <Text
+                  style={
+                    styles.telegramSelected
+                  }
+                >
+                  Telegram notification enabled
+                </Text>
+              ) : null}
             </View>
           )
         )}
@@ -671,14 +1856,19 @@ export default function SplitBillScreen() {
       <TouchableOpacity
         style={[
           styles.createButton,
+
           busy &&
             styles.createButtonDisabled,
         ]}
         onPress={
           handleCreateBill
         }
-        disabled={busy}
-        activeOpacity={0.85}
+        disabled={
+          busy
+        }
+        activeOpacity={
+          0.85
+        }
       >
         <Text
           style={
@@ -693,10 +1883,14 @@ export default function SplitBillScreen() {
 
       {status ? (
         <View
-          style={styles.statusBox}
+          style={
+            styles.statusBox
+          }
         >
           <Text
-            style={styles.statusText}
+            style={
+              styles.statusText
+            }
           >
             {status}
           </Text>
@@ -713,7 +1907,9 @@ export default function SplitBillScreen() {
               lastCreatedBillId
             )
           }
-          activeOpacity={0.85}
+          activeOpacity={
+            0.85
+          }
         >
           <Text
             style={
@@ -725,248 +1921,519 @@ export default function SplitBillScreen() {
         </TouchableOpacity>
       ) : null}
 
-      <Text style={styles.note}>
+      <Text
+        style={
+          styles.note
+        }
+      >
         Arc Testnet · FlowUSD
       </Text>
     </ScrollView>
   );
 }
 
-const styles = StyleSheet.create({
-  screen: {
-    flex: 1,
-    backgroundColor: "#f5f7fb",
-  },
+const styles =
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor:
+        "#f5f7fb",
+    },
 
-  content: {
-    padding: 20,
-    paddingTop: 48,
-    paddingBottom: 40,
-  },
+    content: {
+      padding: 20,
+      paddingTop: 48,
+      paddingBottom: 40,
+    },
 
-  header: {
-    marginBottom: 24,
-  },
+    header: {
+      marginBottom: 20,
+    },
 
-  backButton: {
-    alignSelf: "flex-start",
-    marginBottom: 14,
-  },
+    backButton: {
+      alignSelf:
+        "flex-start",
+      marginBottom: 14,
+    },
 
-  backButtonText: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: "#1769ff",
-  },
+    backButtonText: {
+      fontSize: 14,
+      fontWeight: "700",
+      color: "#1769ff",
+    },
 
-  title: {
-    fontSize: 30,
-    fontWeight: "800",
-    color: "#161b22",
-  },
+    title: {
+      fontSize: 30,
+      fontWeight: "800",
+      color: "#161b22",
+    },
 
-  subtitle: {
-    marginTop: 7,
-    fontSize: 15,
-    lineHeight: 21,
-    color: "#667085",
-  },
+    subtitle: {
+      marginTop: 7,
+      fontSize: 15,
+      lineHeight: 21,
+      color: "#667085",
+    },
 
-  card: {
-    backgroundColor: "#ffffff",
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: "#e3e7ef",
-    marginBottom: 14,
-  },
+    telegramCard: {
+      backgroundColor:
+        "#ffffff",
+      borderRadius: 16,
+      padding: 16,
+      borderWidth: 1,
+      borderColor:
+        "#d8e5ff",
+      marginBottom: 14,
+    },
 
-  summaryCard: {
-    backgroundColor: "#1769ff",
-    borderRadius: 16,
-    padding: 18,
-    marginBottom: 22,
-  },
+    telegramHeader: {
+      flexDirection:
+        "row",
+      justifyContent:
+        "space-between",
+      gap: 12,
+      marginBottom: 14,
+    },
 
-  summaryLabel: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#dce8ff",
-  },
+    telegramHeaderText: {
+      flex: 1,
+    },
 
-  summaryValue: {
-    marginTop: 5,
-    fontSize: 28,
-    fontWeight: "800",
-    color: "#ffffff",
-  },
+    telegramTitle: {
+      fontSize: 17,
+      fontWeight: "800",
+      color: "#161b22",
+    },
 
-  summaryMembers: {
-    marginTop: 5,
-    fontSize: 13,
-    color: "#dce8ff",
-  },
+    telegramSubtitle: {
+      marginTop: 4,
+      fontSize: 13,
+      lineHeight: 18,
+      color: "#667085",
+    },
 
-  sectionHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 12,
-  },
+    telegramBadge: {
+      alignSelf:
+        "flex-start",
+      paddingHorizontal: 9,
+      paddingVertical: 5,
+      borderRadius: 999,
+    },
 
-  sectionTitle: {
-    fontSize: 19,
-    fontWeight: "800",
-    color: "#161b22",
-  },
+    telegramBadgeOn: {
+      backgroundColor:
+        "#ecfdf3",
+    },
 
-  addButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    backgroundColor: "#e8f0ff",
-  },
+    telegramBadgeOff: {
+      backgroundColor:
+        "#f2f4f7",
+    },
 
-  addButtonText: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#1769ff",
-  },
+    telegramBadgeText: {
+      fontSize: 10,
+      fontWeight: "800",
+    },
 
-  memberList: {
-    gap: 12,
-  },
+    telegramBadgeTextOn: {
+      color: "#027a48",
+    },
 
-  memberCard: {
-    backgroundColor: "#ffffff",
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: "#e3e7ef",
-  },
+    telegramBadgeTextOff: {
+      color: "#667085",
+    },
 
-  memberHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 14,
-  },
+    telegramPrimaryButton: {
+      backgroundColor:
+        "#1769ff",
+      borderRadius: 12,
+      paddingVertical: 12,
+      alignItems:
+        "center",
+    },
 
-  memberTitle: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: "#161b22",
-  },
+    telegramPrimaryButtonText: {
+      fontSize: 14,
+      fontWeight: "800",
+      color: "#ffffff",
+    },
 
-  removeText: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#d92d20",
-  },
+    telegramSecondaryButton: {
+      marginTop: 10,
+      borderWidth: 1,
+      borderColor:
+        "#1769ff",
+      borderRadius: 12,
+      paddingVertical: 11,
+      alignItems:
+        "center",
+    },
 
-  label: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#475467",
-    marginBottom: 7,
-  },
+    telegramSecondaryButtonText: {
+      fontSize: 13,
+      fontWeight: "800",
+      color: "#1769ff",
+    },
 
-  amountLabel: {
-    marginTop: 14,
-    marginBottom: 7,
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#475467",
-  },
+    telegramOr: {
+      marginVertical: 10,
+      textAlign: "center",
+      fontSize: 12,
+      fontWeight: "600",
+      color: "#98a2b3",
+    },
 
-  input: {
-    borderWidth: 1,
-    borderColor: "#d0d5dd",
-    backgroundColor: "#ffffff",
-    borderRadius: 12,
-    paddingHorizontal: 13,
-    paddingVertical: 12,
-    fontSize: 15,
-    color: "#161b22",
-  },
+    telegramStatus: {
+      marginTop: 10,
+      fontSize: 12,
+      lineHeight: 17,
+      color: "#475467",
+    },
 
-  amountRow: {
-    flexDirection: "row",
-    gap: 10,
-  },
+    directoryRegisterCard: {
+      padding: 13,
+      borderRadius: 13,
+      backgroundColor:
+        "#f8fafc",
+      borderWidth: 1,
+      borderColor:
+        "#e4e7ec",
+    },
 
-  amountInput: {
-    flex: 1,
-  },
+    directoryRegisterTitle: {
+      fontSize: 15,
+      fontWeight: "800",
+      color: "#161b22",
+    },
 
-  currencyBox: {
-    minWidth: 70,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 12,
-    backgroundColor: "#eef4ff",
-    borderWidth: 1,
-    borderColor: "#d5e3ff",
-  },
+    directoryRegisterHelp: {
+      marginTop: 5,
+      marginBottom: 10,
+      fontSize: 12,
+      lineHeight: 17,
+      color: "#667085",
+    },
 
-  currencyText: {
-    fontSize: 14,
-    fontWeight: "800",
-    color: "#1769ff",
-  },
+    registerInput: {
+      marginBottom: 9,
+    },
 
-  createButton: {
-    marginTop: 22,
-    backgroundColor: "#1769ff",
-    borderRadius: 13,
-    paddingVertical: 15,
-    alignItems: "center",
-  },
+    addDirectoryButton: {
+      backgroundColor:
+        "#12b76a",
+      borderRadius: 11,
+      paddingVertical: 11,
+      alignItems:
+        "center",
+    },
 
-  createButtonDisabled: {
-    opacity: 0.55,
-  },
+    addDirectoryButtonText: {
+      fontSize: 13,
+      fontWeight: "800",
+      color: "#ffffff",
+    },
 
-  createButtonText: {
-    fontSize: 15,
-    fontWeight: "800",
-    color: "#ffffff",
-  },
+    disabledButton: {
+      opacity: 0.5,
+    },
 
-  statusBox: {
-    marginTop: 14,
-    padding: 12,
-    borderRadius: 12,
-    backgroundColor: "#eef4ff",
-  },
+    savedMembersText: {
+      marginTop: 10,
+      fontSize: 12,
+      color: "#667085",
+    },
 
-  statusText: {
-    fontSize: 13,
-    lineHeight: 18,
-    color: "#344054",
-  },
+    savedMembersCount: {
+      fontWeight: "800",
+      color: "#161b22",
+    },
 
-  viewBillButton: {
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: "#1769ff",
-    backgroundColor: "#ffffff",
-    borderRadius: 13,
-    paddingVertical: 14,
-    alignItems: "center",
-  },
+    card: {
+      backgroundColor:
+        "#ffffff",
+      borderRadius: 16,
+      padding: 16,
+      borderWidth: 1,
+      borderColor:
+        "#e3e7ef",
+      marginBottom: 14,
+    },
 
-  viewBillButtonText: {
-    fontSize: 14,
-    fontWeight: "800",
-    color: "#1769ff",
-  },
+    summaryCard: {
+      backgroundColor:
+        "#1769ff",
+      borderRadius: 16,
+      padding: 18,
+      marginBottom: 22,
+    },
 
-  note: {
-    marginTop: 14,
-    textAlign: "center",
-    fontSize: 12,
-    fontWeight: "600",
-    color: "#98a2b3",
-  },
-});
+    summaryLabel: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: "#dce8ff",
+    },
+
+    summaryValue: {
+      marginTop: 5,
+      fontSize: 28,
+      fontWeight: "800",
+      color: "#ffffff",
+    },
+
+    summaryMembers: {
+      marginTop: 5,
+      fontSize: 13,
+      color: "#dce8ff",
+    },
+
+    sectionHeader: {
+      flexDirection:
+        "row",
+      alignItems:
+        "center",
+      justifyContent:
+        "space-between",
+      marginBottom: 12,
+    },
+
+    sectionTitle: {
+      fontSize: 19,
+      fontWeight: "800",
+      color: "#161b22",
+    },
+
+    addButton: {
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 10,
+      backgroundColor:
+        "#e8f0ff",
+    },
+
+    addButtonText: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: "#1769ff",
+    },
+
+    memberList: {
+      gap: 12,
+    },
+
+    memberCard: {
+      backgroundColor:
+        "#ffffff",
+      borderRadius: 16,
+      padding: 16,
+      borderWidth: 1,
+      borderColor:
+        "#e3e7ef",
+    },
+
+    memberHeader: {
+      flexDirection:
+        "row",
+      alignItems:
+        "center",
+      justifyContent:
+        "space-between",
+      marginBottom: 14,
+    },
+
+    memberTitle: {
+      fontSize: 16,
+      fontWeight: "800",
+      color: "#161b22",
+    },
+
+    removeText: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: "#d92d20",
+    },
+
+    directorySection: {
+      marginBottom: 14,
+    },
+
+    directoryLabel: {
+      marginBottom: 8,
+      fontSize: 12,
+      fontWeight: "700",
+      color: "#475467",
+    },
+
+    directoryRow: {
+      gap: 8,
+      paddingRight: 5,
+    },
+
+    directoryChip: {
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor:
+        "#d0d5dd",
+      backgroundColor:
+        "#ffffff",
+    },
+
+    directoryChipSelected: {
+      borderColor:
+        "#1769ff",
+      backgroundColor:
+        "#e8f0ff",
+    },
+
+    directoryChipText: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: "#475467",
+    },
+
+    directoryChipTextSelected: {
+      color: "#1769ff",
+    },
+
+    clearChip: {
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 999,
+      backgroundColor:
+        "#fff1f0",
+    },
+
+    clearChipText: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: "#d92d20",
+    },
+
+    telegramSelected: {
+      marginTop: 10,
+      fontSize: 12,
+      fontWeight: "700",
+      color: "#027a48",
+    },
+
+    label: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: "#475467",
+      marginBottom: 7,
+    },
+
+    amountLabel: {
+      marginTop: 14,
+      marginBottom: 7,
+      fontSize: 13,
+      fontWeight: "700",
+      color: "#475467",
+    },
+
+    input: {
+      borderWidth: 1,
+      borderColor:
+        "#d0d5dd",
+      backgroundColor:
+        "#ffffff",
+      borderRadius: 12,
+      paddingHorizontal: 13,
+      paddingVertical: 12,
+      fontSize: 15,
+      color: "#161b22",
+    },
+
+    amountRow: {
+      flexDirection:
+        "row",
+      gap: 10,
+    },
+
+    amountInput: {
+      flex: 1,
+    },
+
+    currencyBox: {
+      minWidth: 70,
+      alignItems:
+        "center",
+      justifyContent:
+        "center",
+      borderRadius: 12,
+      backgroundColor:
+        "#eef4ff",
+      borderWidth: 1,
+      borderColor:
+        "#d5e3ff",
+    },
+
+    currencyText: {
+      fontSize: 14,
+      fontWeight: "800",
+      color: "#1769ff",
+    },
+
+    createButton: {
+      marginTop: 22,
+      backgroundColor:
+        "#1769ff",
+      borderRadius: 13,
+      paddingVertical: 15,
+      alignItems:
+        "center",
+    },
+
+    createButtonDisabled: {
+      opacity: 0.55,
+    },
+
+    createButtonText: {
+      fontSize: 15,
+      fontWeight: "800",
+      color: "#ffffff",
+    },
+
+    statusBox: {
+      marginTop: 14,
+      padding: 12,
+      borderRadius: 12,
+      backgroundColor:
+        "#eef4ff",
+    },
+
+    statusText: {
+      fontSize: 13,
+      lineHeight: 18,
+      color: "#344054",
+    },
+
+    viewBillButton: {
+      marginTop: 12,
+      borderWidth: 1,
+      borderColor:
+        "#1769ff",
+      backgroundColor:
+        "#ffffff",
+      borderRadius: 13,
+      paddingVertical: 14,
+      alignItems:
+        "center",
+    },
+
+    viewBillButtonText: {
+      fontSize: 14,
+      fontWeight: "800",
+      color: "#1769ff",
+    },
+
+    note: {
+      marginTop: 14,
+      textAlign:
+        "center",
+      fontSize: 12,
+      fontWeight: "600",
+      color: "#98a2b3",
+    },
+  });
